@@ -1,0 +1,145 @@
+#!/bin/bash
+# Template construction and configuration utility
+#
+ 
+set -o errexit
+set -o nounset
+
+root="/tmp/newvz_chroot_debian"
+pkg="/tmp/newvz_pkg"
+out="/tmp/debian-6.0-minimal_6.0_amd64.tar.gz"
+rm -rf "$root" "$pkg"
+debootstrap \
+ --include=cron,openssh-server,logrotate,strace,vim,iptables,tcpdump,bc,mtr-tiny,telnet,sudo,gawk,gpgv,less,iputils-ping,wget,zsh,unzip,aptitude,rsyslog,dhcp3-client,rsync,locales,net-tools\
+ --arch=amd64 --variant=minbase squeeze $root
+
+# Fix locale so apt doesn't kill us
+echo "en_US.UTF-8 UTF-8" >> $root/etc/locale.gen
+chroot $root /usr/sbin/locale-gen en_US.UTF-8
+chroot $root /usr/sbin/update-locale LANG="en_US.UTF-8" LANGUAGE="en_US.UTF-8" LC_ALL="en_US.UTF-8" LC_CTYPE="C"
+chroot $root /usr/sbin/update-locale
+# Set the same timezone as for host system
+[ -f /etc/localtime ] && cp -fp /etc/localtime $root/etc/localtime
+
+# Kill udevd
+#sed -i 's|/sbin/start_udev|#/sbin/start_udev|g' $root/etc/rc.d/rc.sysinit
+#chroot $root "cd /dev && /sbin/MAKEDEV ptyp"
+cat <<EOF >> $root/etc/sysctl.conf
+# On Hardware Node we generally need packet
+# forwarding enabled and proxy arp disabled
+
+net.ipv4.conf.default.forwarding=1
+net.ipv4.conf.default.proxy_arp = 0
+net.ipv4.ip_forward=1
+
+# Enables source route verification
+net.ipv4.conf.all.rp_filter = 1
+
+# Enables the magic-sysrq key
+kernel.sysrq = 1
+
+# TCP Explict Congestion Notification
+net.ipv4.tcp_ecn = 0
+
+# we do not want all our interfaces to send redirects
+net.ipv4.conf.default.send_redirects = 1
+net.ipv4.conf.all.send_redirects = 0
+EOF
+
+cat << EOF > $root/etc/apt/sources.list
+deb http://http.us.debian.org/debian squeeze main contrib
+deb http://security.debian.org squeeze/updates main contrib
+deb http://http.us.debian.org/debian squeeze-updates main
+## backports - ONLY IF YOU KNOW WHAT YOU DO
+# deb http://http.us.debian.org/debian-backports/ squeeze-backports main
+EOF
+cat << EOF > $root/etc/apt/preferences
+Package: *
+Pin: release a=squeeze-backports
+Pin-Priority: 200
+EOF
+
+#Remove services that we don't want starting
+# Turn unneeded services off
+#OFF_SERVICES="control hwclock module mount network-interface
+#plymouth procps tty udev upstart"
+#for S in $OFF_SERVICES; do
+#    rm $root/etc/init/$S*
+#	#This doesn't work right yet; the above is a hack
+#	#chroot $root update-rc.d $S purge
+#done
+                                                                                
+# Turn needed services on
+#ON_SERVICES="network iptables crond sshd rsyslog"
+#for S in $ON_SERVICES; do
+#	[ -f $root/etc/init.d/$S ] && chroot $root /sbin/chkconfig $S on
+#done
+
+#include packages that minbase lacks
+#chroot $root apt-get install -y cron openssh-server logrotate \
+#sysstat strace vim iptables gzip tcpdump bc  mtr-tiny telnet sudo gawk \
+#less ping sed wget zsh unzip aptitude rsyslog || true 
+
+# Convert system to shadow password files
+chroot $root /usr/sbin/pwconv
+
+# Disable root login
+chroot $root /usr/sbin/usermod -L root
+
+# Do not launch *getty on tty devices - they are not accessible from VPS
+#sed -i -e '/getty/d' $root/etc/inittab
+
+# Mount /dev/pts
+echo "none	/dev/pts	devpts	rw	0 0" >> $root/etc/fstab
+
+# Modprobe is NOT our friend
+#chroot $root rm /sbin/modprobe
+#chroot $root ln -s /bin/true /sbin/modprobe
+
+# Disable fsync() in syslog
+#if [ -f $root/etc/syslog.conf ]; then
+#	sed -i -e 's@\([[:space:]]\)\(/var/log/\)@\1-\2@' $root/etc/rsyslog.conf
+#fi
+
+# Remove unnecessary setuid bits
+#find $root/ $root/usr -xdev -type f -perm +04000 | \
+#        grep -vP '(/bin/(su|ping|traceroute)|/usr/bin/(passwd|sudo|chsh|crontab)|/usr/libexec/openssh/ssh-keysign)$' | \
+#        xargs -r chmod ug-s 
+
+# Remove unnecessary setgid bits
+#find $root/ $root/usr -xdev -type f -perm +02000 | \
+#        grep -vP '(/usr/sbin/(postdrop|postqueue)|/usr/bin/ssh-agent)$' | \
+#        xargs -r chmod g-s
+
+# Do not try to unload iptables modules
+#if [ -f $root/etc/sysconfig/iptables-config ]; then
+#	sed -i -e 's/^IPTABLES_MODULES_UNLOAD.*/IPTABLES_MODULES_UNLOAD=\"no\"/' $root/etc/sysconfig/iptables-config 
+#fi
+
+# Set non-interactive mode for initscripts (openvz bug #46)
+#sed -i -e 's/^PROMPT=.*/PROMPT=no/' $root/etc/sysconfig/init
+
+#Cleanup
+chroot $root apt-get clean
+chroot $root apt-get autoremove
+chroot $root rm -f /etc/ssh/ssh_host_*
+
+#Generate new ssh keys on firstboot
+cat << EOF > $root/etc/rc2.d/S15ssh_gen_host_keys
+#!/bin/sh
+ssh-keygen -f /etc/ssh/ssh_host_rsa_key -t rsa -N ''
+ssh-keygen -f /etc/ssh/ssh_host_dsa_key -t dsa -N ''
+rm -f \$0
+EOF
+
+chmod a+x $root/etc/rc2.d/S15ssh_gen_host_keys
+
+chroot $root update-rc.d -f ondemand remove
+
+> $root/etc/resolv.conf \
+echo localhost > $root/etc/hostname \
+> $root/var/log/messages; > $root/var/log/auth.log; > $root/var/log/kern.log; > $root/var/log/bootstrap.log; \
+> $root/var/log/dpkg.log; > $root/var/log/syslog; > $root/var/log/daemon.log; > $root/var/log/apt/term.log; rm -f $root/var/log/*.0 $root/var/log/*.1
+rm -f $out || true
+tar --numeric-owner -C $root -czf $out .
+echo "Completed template can be found at $out"

@@ -1,0 +1,5 @@
+These require that they be run on a CentOS or other RPM based distro for 
+the RedHat derived systems, and on Debian or Ubuntu for the dpkg based 
+systems.  You'll need either yumdownloader or debootstrap respectively;
+these will halt on any errors encountered along the way.  Please let me
+know what breaks.
